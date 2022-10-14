@@ -222,6 +222,31 @@ func (mbox *Mailbox) CopyMessages(uid bool, seqset *imap.SeqSet, destName string
 	return nil
 }
 
+func (mbox *Mailbox) MoveMessages(uid bool, seqset *imap.SeqSet, destName string) error {
+	dest, ok := mbox.user.mailboxes[destName]
+	if !ok {
+		return backend.ErrNoSuchMailbox
+	}
+	for i, msg := range mbox.Messages {
+		var id uint32
+		if uid {
+			id = msg.Uid
+		} else {
+			id = uint32(i + 1)
+		}
+		if !seqset.Contains(id) {
+			continue
+		}
+
+		msgCopy := *msg
+		msgCopy.Uid = dest.uidNext()
+		dest.Messages = append(dest.Messages, &msgCopy)
+		mbox.Messages[i] = nil
+
+	}
+	return nil
+}
+
 func (mbox *Mailbox) Expunge() error {
 	for i := len(mbox.Messages) - 1; i >= 0; i-- {
 		msg := mbox.Messages[i]

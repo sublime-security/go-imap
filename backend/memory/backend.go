@@ -40,6 +40,9 @@ func (be *Backend) AddUser(username, password string) (*User, error) {
 }
 
 func (u *User) SetMailboxes(mailboxes map[string]*Mailbox) {
+	for _, mb := range mailboxes {
+		mb.user = u
+	}
 	u.mailboxes = mailboxes
 }
 
