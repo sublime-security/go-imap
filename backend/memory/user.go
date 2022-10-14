@@ -17,11 +17,12 @@ func (u *User) Username() string {
 }
 
 func (u *User) ListMailboxes(subscribed bool) (mailboxes []backend.Mailbox, err error) {
-	for _, mailbox := range u.mailboxes {
+	for name, mailbox := range u.mailboxes {
 		if subscribed && !mailbox.Subscribed {
 			continue
 		}
 
+		mailbox.name = name
 		mailboxes = append(mailboxes, mailbox)
 	}
 	return
