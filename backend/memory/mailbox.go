@@ -241,7 +241,7 @@ func (mbox *Mailbox) MoveMessages(uid bool, seqset *imap.SeqSet, destName string
 		msgCopy := *msg
 		msgCopy.Uid = dest.uidNext()
 		dest.Messages = append(dest.Messages, &msgCopy)
-		mbox.Messages[i] = nil
+		mbox.Messages = append(mbox.Messages[:i], mbox.Messages[i+1:]...)
 
 	}
 	return nil
@@ -250,7 +250,9 @@ func (mbox *Mailbox) MoveMessages(uid bool, seqset *imap.SeqSet, destName string
 func (mbox *Mailbox) Expunge() error {
 	for i := len(mbox.Messages) - 1; i >= 0; i-- {
 		msg := mbox.Messages[i]
-
+		if msg == nil {
+			return nil
+		}
 		deleted := false
 		for _, flag := range msg.Flags {
 			if flag == imap.DeletedFlag {
