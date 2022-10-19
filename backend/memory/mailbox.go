@@ -14,6 +14,7 @@ var Delimiter = "/"
 type Mailbox struct {
 	Subscribed bool
 	Messages   []*Message
+	Attributes []string
 
 	name string
 	user *User
@@ -25,8 +26,9 @@ func (mbox *Mailbox) Name() string {
 
 func (mbox *Mailbox) Info() (*imap.MailboxInfo, error) {
 	info := &imap.MailboxInfo{
-		Delimiter: Delimiter,
-		Name:      mbox.name,
+		Delimiter:  Delimiter,
+		Name:       mbox.name,
+		Attributes: mbox.Attributes,
 	}
 	return info, nil
 }
