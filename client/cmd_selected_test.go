@@ -948,6 +948,23 @@ func Test_parseCopyData(t *testing.T) {
 			status:  copyUid("1", "78", "42:*"),
 			wantErr: true,
 		},
+		{
+			name:    "uid 0 rejected",
+			status:  copyUid("1", "0", "42"),
+			wantErr: true,
+		},
+		{
+			name:    "empty set rejected",
+			status:  copyUid("1", "", "42"),
+			wantErr: true,
+		},
+		{
+			// A malicious/buggy server must not be able to make the client
+			// allocate a multi-gigabyte slice from a tiny response.
+			name:    "oversized range rejected",
+			status:  copyUid("1", "1:4294967295", "1:4294967295"),
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

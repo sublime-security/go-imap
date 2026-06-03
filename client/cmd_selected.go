@@ -362,10 +362,19 @@ func parseCopyData(status *imap.StatusResp) (*CopyData, error) {
 	}, nil
 }
 
+// maxCopyUIDs bounds how many UIDs parseUIDList will materialize from a single
+// COPYUID set. COPYUID is parsed from untrusted server data, where a uid-range
+// such as "1:4294967295" would otherwise expand to a multi-gigabyte slice. A
+// legitimate COPYUID never approaches this — it carries one UID per message
+// copied by a single command.
+const maxCopyUIDs = 1 << 20
+
 // parseUIDList expands a COPYUID uid-set (RFC 4315) into UIDs in the order the
 // server listed them, so the source and destination lists stay positionally
-// aligned. Unlike imap.ParseSeqSet it neither sorts nor coalesces, and it
-// rejects the "*" wildcard since COPYUID always reports concrete UIDs.
+// aligned. Unlike imap.ParseSeqSet it neither sorts nor coalesces. It rejects
+// the "*" wildcard and a UID of 0 (UIDs are nz-number), and caps the total
+// number of expanded UIDs at maxCopyUIDs so a malformed range can't exhaust
+// memory.
 func parseUIDList(set string) ([]uint32, error) {
 	if set == "" {
 		return nil, fmt.Errorf("empty uid set")
@@ -375,23 +384,36 @@ func parseUIDList(set string) ([]uint32, error) {
 	for _, part := range strings.Split(set, ",") {
 		lo, hi, isRange := strings.Cut(part, ":")
 
-		start, err := strconv.ParseUint(lo, 10, 32)
+		start, err := parseUID(lo)
 		if err != nil {
-			return nil, fmt.Errorf("invalid uid %q: %w", lo, err)
+			return nil, err
 		}
 		if !isRange {
-			uids = append(uids, uint32(start))
+			if len(uids)+1 > maxCopyUIDs {
+				return nil, fmt.Errorf("uid set exceeds %d entries", maxCopyUIDs)
+			}
+			uids = append(uids, start)
 			continue
 		}
 
-		stop, err := strconv.ParseUint(hi, 10, 32)
+		stop, err := parseUID(hi)
 		if err != nil {
-			return nil, fmt.Errorf("invalid uid %q: %w", hi, err)
+			return nil, err
 		}
+
+		// Reject oversized ranges before allocating anything.
+		span := uint64(stop) - uint64(start)
+		if start > stop {
+			span = uint64(start) - uint64(stop)
+		}
+		if uint64(len(uids))+span+1 > maxCopyUIDs {
+			return nil, fmt.Errorf("uid set exceeds %d entries", maxCopyUIDs)
+		}
+
 		// Ranges may be given ascending or descending; expand in the listed
 		// direction. The break-on-equal form avoids uint overflow at the bounds.
 		for u := start; ; {
-			uids = append(uids, uint32(u))
+			uids = append(uids, u)
 			if u == stop {
 				break
 			}
@@ -403,6 +425,19 @@ func parseUIDList(set string) ([]uint32, error) {
 		}
 	}
 	return uids, nil
+}
+
+// parseUID parses a single COPYUID UID atom. UIDs are nz-number (RFC 3501), so 0
+// is rejected.
+func parseUID(s string) (uint32, error) {
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid uid %q: %w", s, err)
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("invalid uid 0")
+	}
+	return uint32(n), nil
 }
 
 func (c *Client) move(uid bool, seqset *imap.SeqSet, dest string) error {
