@@ -965,6 +965,19 @@ func Test_parseCopyData(t *testing.T) {
 			status:  copyUid("1", "1:4294967295", "1:4294967295"),
 			wantErr: true,
 		},
+		{
+			// The cap is enforced against the running total, so it can't be
+			// bypassed by splitting an oversized set across comma-separated
+			// ranges each individually under the limit.
+			name:    "comma-separated ranges exceed cap",
+			status:  copyUid("1", "1:600000,1:600000", "1:600000,1:600000"),
+			wantErr: true,
+		},
+		{
+			name:    "uidvalidity 0 rejected",
+			status:  copyUid("0", "78", "42"),
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

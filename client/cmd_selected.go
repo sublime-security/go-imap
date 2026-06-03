@@ -343,6 +343,9 @@ func parseCopyData(status *imap.StatusResp) (*CopyData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("imap: invalid COPYUID uidvalidity %q: %w", args[0], err)
 	}
+	if uidValidity == 0 {
+		return nil, fmt.Errorf("imap: invalid COPYUID uidvalidity 0")
+	}
 	sourceUIDs, err := parseUIDList(args[1])
 	if err != nil {
 		return nil, fmt.Errorf("imap: invalid COPYUID source set %q: %w", args[1], err)
