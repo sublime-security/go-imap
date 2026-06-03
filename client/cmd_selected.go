@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/commands"
@@ -279,16 +280,15 @@ func (c *Client) UidCopy(seqset *imap.SeqSet, dest string) error {
 	return c.copy(true, seqset, dest)
 }
 
-// CopyData holds the COPYUID data from the UIDPLUS extension (RFC 4315),
-// reporting the source and destination UID sets from the server's COPYUID
-// response code. While RFC 4315 defines the two sets as positionally
-// corresponding on the wire, that pairing is not recoverable here: ParseSeqSet
-// sorts and coalesces ranges. For a single-message copy each set holds one UID,
-// so DestUIDs unambiguously gives the message's new UID.
+// CopyData holds the COPYUID data from the UIDPLUS extension (RFC 4315). The
+// message at SourceUIDs[i] in the source mailbox was copied to DestUIDs[i] in
+// the destination mailbox; the two slices are parallel and preserve the order
+// of the server's COPYUID response, so the positional mapping defined by
+// RFC 4315 is retained (unlike ParseSeqSet, which sorts and coalesces).
 type CopyData struct {
 	UIDValidity uint32
-	SourceUIDs  *imap.SeqSet
-	DestUIDs    *imap.SeqSet
+	SourceUIDs  []uint32
+	DestUIDs    []uint32
 }
 
 // UidCopyWithData is identical to UidCopy, but additionally returns the COPYUID
@@ -343,13 +343,16 @@ func parseCopyData(status *imap.StatusResp) (*CopyData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("imap: invalid COPYUID uidvalidity %q: %w", args[0], err)
 	}
-	sourceUIDs, err := imap.ParseSeqSet(args[1])
+	sourceUIDs, err := parseUIDList(args[1])
 	if err != nil {
 		return nil, fmt.Errorf("imap: invalid COPYUID source set %q: %w", args[1], err)
 	}
-	destUIDs, err := imap.ParseSeqSet(args[2])
+	destUIDs, err := parseUIDList(args[2])
 	if err != nil {
 		return nil, fmt.Errorf("imap: invalid COPYUID destination set %q: %w", args[2], err)
+	}
+	if len(sourceUIDs) != len(destUIDs) {
+		return nil, fmt.Errorf("imap: COPYUID source/destination set size mismatch: %d source vs %d destination UIDs", len(sourceUIDs), len(destUIDs))
 	}
 
 	return &CopyData{
@@ -357,6 +360,49 @@ func parseCopyData(status *imap.StatusResp) (*CopyData, error) {
 		SourceUIDs:  sourceUIDs,
 		DestUIDs:    destUIDs,
 	}, nil
+}
+
+// parseUIDList expands a COPYUID uid-set (RFC 4315) into UIDs in the order the
+// server listed them, so the source and destination lists stay positionally
+// aligned. Unlike imap.ParseSeqSet it neither sorts nor coalesces, and it
+// rejects the "*" wildcard since COPYUID always reports concrete UIDs.
+func parseUIDList(set string) ([]uint32, error) {
+	if set == "" {
+		return nil, fmt.Errorf("empty uid set")
+	}
+
+	var uids []uint32
+	for _, part := range strings.Split(set, ",") {
+		lo, hi, isRange := strings.Cut(part, ":")
+
+		start, err := strconv.ParseUint(lo, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid uid %q: %w", lo, err)
+		}
+		if !isRange {
+			uids = append(uids, uint32(start))
+			continue
+		}
+
+		stop, err := strconv.ParseUint(hi, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid uid %q: %w", hi, err)
+		}
+		// Ranges may be given ascending or descending; expand in the listed
+		// direction. The break-on-equal form avoids uint overflow at the bounds.
+		for u := start; ; {
+			uids = append(uids, uint32(u))
+			if u == stop {
+				break
+			}
+			if start <= stop {
+				u++
+			} else {
+				u--
+			}
+		}
+	}
+	return uids, nil
 }
 
 func (c *Client) move(uid bool, seqset *imap.SeqSet, dest string) error {

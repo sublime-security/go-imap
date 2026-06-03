@@ -789,14 +789,6 @@ func TestClient_Copy_Uid(t *testing.T) {
 }
 
 func TestClient_UidCopyWithData(t *testing.T) {
-	mustSeqSet := func(set string) *imap.SeqSet {
-		s, err := imap.ParseSeqSet(set)
-		if err != nil {
-			t.Fatalf("ParseSeqSet(%q): %v", set, err)
-		}
-		return s
-	}
-
 	tests := []struct {
 		name     string
 		response string // server response following the command tag and a space
@@ -808,23 +800,37 @@ func TestClient_UidCopyWithData(t *testing.T) {
 			response: "OK [COPYUID 1234567890 78 42] UID COPY completed\r\n",
 			wantData: &CopyData{
 				UIDValidity: 1234567890,
-				SourceUIDs:  mustSeqSet("78"),
-				DestUIDs:    mustSeqSet("42"),
+				SourceUIDs:  []uint32{78},
+				DestUIDs:    []uint32{42},
 			},
 		},
 		{
-			name:     "uidplus message range",
+			name:     "uidplus message range expands in order",
 			response: "OK [COPYUID 1234567890 78:80 42:44] UID COPY completed\r\n",
 			wantData: &CopyData{
 				UIDValidity: 1234567890,
-				SourceUIDs:  mustSeqSet("78:80"),
-				DestUIDs:    mustSeqSet("42:44"),
+				SourceUIDs:  []uint32{78, 79, 80},
+				DestUIDs:    []uint32{42, 43, 44},
+			},
+		},
+		{
+			name:     "uidplus discontiguous set preserves source-to-dest pairing",
+			response: "OK [COPYUID 1234567890 5,10:12,7 100,200:202,150] UID COPY completed\r\n",
+			wantData: &CopyData{
+				UIDValidity: 1234567890,
+				SourceUIDs:  []uint32{5, 10, 11, 12, 7},
+				DestUIDs:    []uint32{100, 200, 201, 202, 150},
 			},
 		},
 		{
 			name:     "server without uidplus",
 			response: "OK UID COPY completed\r\n",
 			wantData: nil,
+		},
+		{
+			name:     "copyuid source/dest size mismatch",
+			response: "OK [COPYUID 1234567890 78:80 42] UID COPY completed\r\n",
+			wantErr:  true,
 		},
 		{
 			name:     "server error",
@@ -877,14 +883,6 @@ func TestClient_UidCopyWithData(t *testing.T) {
 }
 
 func Test_parseCopyData(t *testing.T) {
-	mustSeqSet := func(set string) *imap.SeqSet {
-		s, err := imap.ParseSeqSet(set)
-		if err != nil {
-			t.Fatalf("ParseSeqSet(%q): %v", set, err)
-		}
-		return s
-	}
-
 	copyUid := func(args ...interface{}) *imap.StatusResp {
 		return &imap.StatusResp{Type: imap.StatusRespOk, Code: imap.CodeCopyUid, Arguments: args}
 	}
@@ -908,7 +906,12 @@ func Test_parseCopyData(t *testing.T) {
 		{
 			name:   "valid",
 			status: copyUid("1234567890", "78", "42"),
-			want:   &CopyData{UIDValidity: 1234567890, SourceUIDs: mustSeqSet("78"), DestUIDs: mustSeqSet("42")},
+			want:   &CopyData{UIDValidity: 1234567890, SourceUIDs: []uint32{78}, DestUIDs: []uint32{42}},
+		},
+		{
+			name:   "descending range expands in listed order",
+			status: copyUid("1", "80:78", "44:42"),
+			want:   &CopyData{UIDValidity: 1, SourceUIDs: []uint32{80, 79, 78}, DestUIDs: []uint32{44, 43, 42}},
 		},
 		{
 			name:    "wrong argument count",
@@ -933,6 +936,16 @@ func Test_parseCopyData(t *testing.T) {
 		{
 			name:    "unparseable dest set",
 			status:  copyUid("1", "78", "4:x"),
+			wantErr: true,
+		},
+		{
+			name:    "source/dest size mismatch",
+			status:  copyUid("1", "78:80", "42"),
+			wantErr: true,
+		},
+		{
+			name:    "wildcard rejected",
+			status:  copyUid("1", "78", "42:*"),
 			wantErr: true,
 		},
 	}
