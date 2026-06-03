@@ -876,6 +876,86 @@ func TestClient_UidCopyWithData(t *testing.T) {
 	}
 }
 
+func Test_parseCopyData(t *testing.T) {
+	mustSeqSet := func(set string) *imap.SeqSet {
+		s, err := imap.ParseSeqSet(set)
+		if err != nil {
+			t.Fatalf("ParseSeqSet(%q): %v", set, err)
+		}
+		return s
+	}
+
+	copyUid := func(args ...interface{}) *imap.StatusResp {
+		return &imap.StatusResp{Type: imap.StatusRespOk, Code: imap.CodeCopyUid, Arguments: args}
+	}
+
+	tests := []struct {
+		name    string
+		status  *imap.StatusResp
+		want    *CopyData
+		wantErr bool
+	}{
+		{
+			name:   "nil status",
+			status: nil,
+			want:   nil,
+		},
+		{
+			name:   "no copyuid code",
+			status: &imap.StatusResp{Type: imap.StatusRespOk},
+			want:   nil,
+		},
+		{
+			name:   "valid",
+			status: copyUid("1234567890", "78", "42"),
+			want:   &CopyData{UIDValidity: 1234567890, SourceUIDs: mustSeqSet("78"), DestUIDs: mustSeqSet("42")},
+		},
+		{
+			name:    "wrong argument count",
+			status:  copyUid("1234567890", "78"),
+			wantErr: true,
+		},
+		{
+			name:    "non-string argument",
+			status:  copyUid("1234567890", 78, "42"),
+			wantErr: true,
+		},
+		{
+			name:    "non-numeric uidvalidity",
+			status:  copyUid("abc", "78", "42"),
+			wantErr: true,
+		},
+		{
+			name:    "unparseable source set",
+			status:  copyUid("1", "x", "42"),
+			wantErr: true,
+		},
+		{
+			name:    "unparseable dest set",
+			status:  copyUid("1", "78", "4:x"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseCopyData(tt.status)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseCopyData() expected an error, got nil (data=%#v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseCopyData() = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("parseCopyData() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClient_Unselect(t *testing.T) {
 	c, s := newTestClient(t)
 	defer s.Close()
