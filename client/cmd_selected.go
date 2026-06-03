@@ -280,8 +280,11 @@ func (c *Client) UidCopy(seqset *imap.SeqSet, dest string) error {
 }
 
 // CopyData holds the COPYUID data from the UIDPLUS extension (RFC 4315),
-// reporting the UIDs assigned to the copied messages in the destination
-// mailbox. DestUIDs corresponds positionally to SourceUIDs.
+// reporting the source and destination UID sets from the server's COPYUID
+// response code. While RFC 4315 defines the two sets as positionally
+// corresponding on the wire, that pairing is not recoverable here: ParseSeqSet
+// sorts and coalesces ranges. For a single-message copy each set holds one UID,
+// so DestUIDs unambiguously gives the message's new UID.
 type CopyData struct {
 	UIDValidity uint32
 	SourceUIDs  *imap.SeqSet
@@ -289,11 +292,12 @@ type CopyData struct {
 }
 
 // UidCopyWithData is identical to UidCopy, but additionally returns the COPYUID
-// data (RFC 4315) when the server advertises UIDPLUS. This lets callers learn
+// data (RFC 4315) when the server includes a COPYUID response code (which
+// UIDPLUS-capable servers send on a successful copy). This lets callers learn
 // the destination UID of a copied message directly, instead of searching for it
-// afterward. When the server does not return a COPYUID code, the returned
-// *CopyData is nil and err is nil; callers should then locate the copied
-// messages by other means.
+// afterward. When the response carries no COPYUID code, the returned *CopyData
+// is nil and err is nil; callers should then locate the copied messages by
+// other means.
 func (c *Client) UidCopyWithData(seqset *imap.SeqSet, dest string) (*CopyData, error) {
 	if c.State() != imap.SelectedState {
 		return nil, ErrNoMailboxSelected
