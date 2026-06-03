@@ -2,6 +2,8 @@ package client
 
 import (
 	"errors"
+	"fmt"
+	"strconv"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/commands"
@@ -275,6 +277,82 @@ func (c *Client) Copy(seqset *imap.SeqSet, dest string) error {
 // identifiers instead of message sequence numbers.
 func (c *Client) UidCopy(seqset *imap.SeqSet, dest string) error {
 	return c.copy(true, seqset, dest)
+}
+
+// CopyData holds the COPYUID data from the UIDPLUS extension (RFC 4315),
+// reporting the UIDs assigned to the copied messages in the destination
+// mailbox. DestUIDs corresponds positionally to SourceUIDs.
+type CopyData struct {
+	UIDValidity uint32
+	SourceUIDs  *imap.SeqSet
+	DestUIDs    *imap.SeqSet
+}
+
+// UidCopyWithData is identical to UidCopy, but additionally returns the COPYUID
+// data (RFC 4315) when the server advertises UIDPLUS. This lets callers learn
+// the destination UID of a copied message directly, instead of searching for it
+// afterward. When the server does not return a COPYUID code, the returned
+// *CopyData is nil and err is nil; callers should then locate the copied
+// messages by other means.
+func (c *Client) UidCopyWithData(seqset *imap.SeqSet, dest string) (*CopyData, error) {
+	if c.State() != imap.SelectedState {
+		return nil, ErrNoMailboxSelected
+	}
+
+	cmd := &commands.Uid{Cmd: &commands.Copy{
+		SeqSet:  seqset,
+		Mailbox: dest,
+	}}
+
+	status, err := c.execute(cmd, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := status.Err(); err != nil {
+		return nil, err
+	}
+
+	return parseCopyData(status)
+}
+
+// parseCopyData extracts UIDPLUS COPYUID data from a command's status response.
+// It returns (nil, nil) when the response carries no COPYUID code, which is the
+// case for servers that don't support UIDPLUS.
+func parseCopyData(status *imap.StatusResp) (*CopyData, error) {
+	if status == nil || status.Code != imap.CodeCopyUid {
+		return nil, nil
+	}
+	if len(status.Arguments) != 3 {
+		return nil, fmt.Errorf("imap: malformed COPYUID response code: expected 3 arguments, got %d", len(status.Arguments))
+	}
+
+	args := make([]string, len(status.Arguments))
+	for i, a := range status.Arguments {
+		s, ok := a.(string)
+		if !ok {
+			return nil, fmt.Errorf("imap: malformed COPYUID argument %d: expected string, got %T", i, a)
+		}
+		args[i] = s
+	}
+
+	uidValidity, err := strconv.ParseUint(args[0], 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("imap: invalid COPYUID uidvalidity %q: %w", args[0], err)
+	}
+	sourceUIDs, err := imap.ParseSeqSet(args[1])
+	if err != nil {
+		return nil, fmt.Errorf("imap: invalid COPYUID source set %q: %w", args[1], err)
+	}
+	destUIDs, err := imap.ParseSeqSet(args[2])
+	if err != nil {
+		return nil, fmt.Errorf("imap: invalid COPYUID destination set %q: %w", args[2], err)
+	}
+
+	return &CopyData{
+		UIDValidity: uint32(uidValidity),
+		SourceUIDs:  sourceUIDs,
+		DestUIDs:    destUIDs,
+	}, nil
 }
 
 func (c *Client) move(uid bool, seqset *imap.SeqSet, dest string) error {

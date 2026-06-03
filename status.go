@@ -54,6 +54,9 @@ const (
 	CodeUidNext        StatusRespCode = "UIDNEXT"
 	CodeUidValidity    StatusRespCode = "UIDVALIDITY"
 	CodeUnseen         StatusRespCode = "UNSEEN"
+	// CodeCopyUid is the COPYUID response code from the UIDPLUS extension
+	// (RFC 4315 section 3), returned on a successful COPY or MOVE.
+	CodeCopyUid StatusRespCode = "COPYUID"
 )
 
 // A status response.

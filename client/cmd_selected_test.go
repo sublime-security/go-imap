@@ -788,6 +788,94 @@ func TestClient_Copy_Uid(t *testing.T) {
 	}
 }
 
+func TestClient_UidCopyWithData(t *testing.T) {
+	mustSeqSet := func(set string) *imap.SeqSet {
+		s, err := imap.ParseSeqSet(set)
+		if err != nil {
+			t.Fatalf("ParseSeqSet(%q): %v", set, err)
+		}
+		return s
+	}
+
+	tests := []struct {
+		name     string
+		response string // server response following the command tag and a space
+		wantData *CopyData
+		wantErr  bool
+	}{
+		{
+			name:     "uidplus single message",
+			response: "OK [COPYUID 1234567890 78 42] UID COPY completed\r\n",
+			wantData: &CopyData{
+				UIDValidity: 1234567890,
+				SourceUIDs:  mustSeqSet("78"),
+				DestUIDs:    mustSeqSet("42"),
+			},
+		},
+		{
+			name:     "uidplus message range",
+			response: "OK [COPYUID 1234567890 78:80 42:44] UID COPY completed\r\n",
+			wantData: &CopyData{
+				UIDValidity: 1234567890,
+				SourceUIDs:  mustSeqSet("78:80"),
+				DestUIDs:    mustSeqSet("42:44"),
+			},
+		},
+		{
+			name:     "server without uidplus",
+			response: "OK UID COPY completed\r\n",
+			wantData: nil,
+		},
+		{
+			name:     "server error",
+			response: "NO [TRYCREATE] mailbox does not exist\r\n",
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, s := newTestClient(t)
+			defer s.Close()
+
+			setClientState(c, imap.SelectedState, nil)
+
+			seqset, _ := imap.ParseSeqSet("78")
+
+			type result struct {
+				data *CopyData
+				err  error
+			}
+			resCh := make(chan result, 1)
+			go func() {
+				data, err := c.UidCopyWithData(seqset, "Drafts")
+				resCh <- result{data, err}
+			}()
+
+			tag, cmd := s.ScanCmd()
+			if cmd != "UID COPY 78 \"Drafts\"" {
+				t.Fatalf("client sent command %v, want %v", cmd, "UID COPY 78 \"Drafts\"")
+			}
+
+			s.WriteString(tag + " " + tt.response)
+
+			res := <-resCh
+			if tt.wantErr {
+				if res.err == nil {
+					t.Fatalf("UidCopyWithData() expected an error, got nil")
+				}
+				return
+			}
+			if res.err != nil {
+				t.Fatalf("UidCopyWithData() = %v", res.err)
+			}
+			if !reflect.DeepEqual(res.data, tt.wantData) {
+				t.Errorf("CopyData = %#v, want %#v", res.data, tt.wantData)
+			}
+		})
+	}
+}
+
 func TestClient_Unselect(t *testing.T) {
 	c, s := newTestClient(t)
 	defer s.Close()
