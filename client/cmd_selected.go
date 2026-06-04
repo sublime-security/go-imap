@@ -292,12 +292,13 @@ type CopyData struct {
 }
 
 // UidCopyWithData is identical to UidCopy, but additionally returns the COPYUID
-// data (RFC 4315) when the server includes a COPYUID response code (which
-// UIDPLUS-capable servers send on a successful copy). This lets callers learn
-// the destination UID of a copied message directly, instead of searching for it
-// afterward. When the response carries no COPYUID code, the returned *CopyData
-// is nil and err is nil; callers should then locate the copied messages by
-// other means.
+// data when the server includes a COPYUID response code. RFC 4315 section 3
+// recommends that servers return COPYUID even when they don't advertise the
+// UIDPLUS capability, so this keys off the presence of the response code rather
+// than a capability check. This lets callers learn the destination UID of a
+// copied message directly, instead of searching for it afterward. When the
+// response carries no COPYUID code, the returned *CopyData is nil and err is
+// nil; callers should then locate the copied messages by other means.
 func (c *Client) UidCopyWithData(seqset *imap.SeqSet, dest string) (*CopyData, error) {
 	if c.State() != imap.SelectedState {
 		return nil, ErrNoMailboxSelected
