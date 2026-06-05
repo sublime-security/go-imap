@@ -386,7 +386,12 @@ func parseUIDList(set string) ([]uint32, error) {
 
 	var uids []uint32
 	for _, part := range strings.Split(set, ",") {
-		lo, hi, isRange := strings.Cut(part, ":")
+		// strings.Cut would be cleaner but is Go 1.18+; this module targets go 1.13.
+		lo, hi := part, ""
+		isRange := false
+		if idx := strings.IndexByte(part, ':'); idx >= 0 {
+			lo, hi, isRange = part[:idx], part[idx+1:], true
+		}
 
 		start, err := parseUID(lo)
 		if err != nil {
