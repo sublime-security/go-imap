@@ -2,6 +2,9 @@ package client
 
 import (
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/commands"
@@ -275,6 +278,175 @@ func (c *Client) Copy(seqset *imap.SeqSet, dest string) error {
 // identifiers instead of message sequence numbers.
 func (c *Client) UidCopy(seqset *imap.SeqSet, dest string) error {
 	return c.copy(true, seqset, dest)
+}
+
+// CopyData holds the COPYUID data from the UIDPLUS extension (RFC 4315). The
+// message at SourceUIDs[i] in the source mailbox was copied to DestUIDs[i] in
+// the destination mailbox; the two slices are parallel and preserve the order
+// of the server's COPYUID response, so the positional mapping defined by
+// RFC 4315 is retained (unlike ParseSeqSet, which sorts and coalesces).
+type CopyData struct {
+	UIDValidity uint32
+	SourceUIDs  []uint32
+	DestUIDs    []uint32
+}
+
+// UidCopyWithData is identical to UidCopy, but additionally returns the COPYUID
+// data when the server includes a COPYUID response code. RFC 4315 section 3
+// recommends that servers return COPYUID even when they don't advertise the
+// UIDPLUS capability, so this keys off the presence of the response code rather
+// than a capability check. This lets callers learn the destination UID of a
+// copied message directly, instead of searching for it afterward. When the
+// response carries no COPYUID code, the returned *CopyData is nil and err is
+// nil; callers should then locate the copied messages by other means.
+func (c *Client) UidCopyWithData(seqset *imap.SeqSet, dest string) (*CopyData, error) {
+	if c.State() != imap.SelectedState {
+		return nil, ErrNoMailboxSelected
+	}
+
+	cmd := &commands.Uid{Cmd: &commands.Copy{
+		SeqSet:  seqset,
+		Mailbox: dest,
+	}}
+
+	status, err := c.execute(cmd, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := status.Err(); err != nil {
+		return nil, err
+	}
+
+	return parseCopyData(status)
+}
+
+// parseCopyData extracts UIDPLUS COPYUID data from a command's status response.
+// It returns (nil, nil) when the response carries no COPYUID code, which is the
+// case for servers that don't support UIDPLUS.
+func parseCopyData(status *imap.StatusResp) (*CopyData, error) {
+	if status == nil || status.Code != imap.CodeCopyUid {
+		return nil, nil
+	}
+	if len(status.Arguments) != 3 {
+		return nil, fmt.Errorf("imap: malformed COPYUID response code: expected 3 arguments, got %d", len(status.Arguments))
+	}
+
+	args := make([]string, len(status.Arguments))
+	for i, a := range status.Arguments {
+		s, ok := a.(string)
+		if !ok {
+			return nil, fmt.Errorf("imap: malformed COPYUID argument %d: expected string, got %T", i, a)
+		}
+		args[i] = s
+	}
+
+	uidValidity, err := strconv.ParseUint(args[0], 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("imap: invalid COPYUID uidvalidity %q: %w", args[0], err)
+	}
+	if uidValidity == 0 {
+		return nil, fmt.Errorf("imap: invalid COPYUID uidvalidity 0")
+	}
+	sourceUIDs, err := parseUIDList(args[1])
+	if err != nil {
+		return nil, fmt.Errorf("imap: invalid COPYUID source set %q: %w", args[1], err)
+	}
+	destUIDs, err := parseUIDList(args[2])
+	if err != nil {
+		return nil, fmt.Errorf("imap: invalid COPYUID destination set %q: %w", args[2], err)
+	}
+	if len(sourceUIDs) != len(destUIDs) {
+		return nil, fmt.Errorf("imap: COPYUID source/destination set size mismatch: %d source vs %d destination UIDs", len(sourceUIDs), len(destUIDs))
+	}
+
+	return &CopyData{
+		UIDValidity: uint32(uidValidity),
+		SourceUIDs:  sourceUIDs,
+		DestUIDs:    destUIDs,
+	}, nil
+}
+
+// maxCopyUIDs bounds how many UIDs parseUIDList will materialize from a single
+// COPYUID set. COPYUID is parsed from untrusted server data, where a uid-range
+// such as "1:4294967295" would otherwise expand to a multi-gigabyte slice. A
+// legitimate COPYUID never approaches this — it carries one UID per message
+// copied by a single command.
+const maxCopyUIDs = 1 << 20
+
+// parseUIDList expands a COPYUID uid-set (RFC 4315) into UIDs in the order the
+// server listed them, so the source and destination lists stay positionally
+// aligned. Unlike imap.ParseSeqSet it neither sorts nor coalesces. It rejects
+// the "*" wildcard and a UID of 0 (UIDs are nz-number), and caps the total
+// number of expanded UIDs at maxCopyUIDs so a malformed range can't exhaust
+// memory.
+func parseUIDList(set string) ([]uint32, error) {
+	if set == "" {
+		return nil, fmt.Errorf("empty uid set")
+	}
+
+	var uids []uint32
+	for _, part := range strings.Split(set, ",") {
+		// strings.Cut would be cleaner but is Go 1.18+; this module targets go 1.13.
+		lo, hi := part, ""
+		isRange := false
+		if idx := strings.IndexByte(part, ':'); idx >= 0 {
+			lo, hi, isRange = part[:idx], part[idx+1:], true
+		}
+
+		start, err := parseUID(lo)
+		if err != nil {
+			return nil, err
+		}
+		if !isRange {
+			if len(uids)+1 > maxCopyUIDs {
+				return nil, fmt.Errorf("uid set exceeds %d entries", maxCopyUIDs)
+			}
+			uids = append(uids, start)
+			continue
+		}
+
+		stop, err := parseUID(hi)
+		if err != nil {
+			return nil, err
+		}
+
+		// Reject oversized ranges before allocating anything.
+		span := uint64(stop) - uint64(start)
+		if start > stop {
+			span = uint64(start) - uint64(stop)
+		}
+		if uint64(len(uids))+span+1 > maxCopyUIDs {
+			return nil, fmt.Errorf("uid set exceeds %d entries", maxCopyUIDs)
+		}
+
+		// Ranges may be given ascending or descending; expand in the listed
+		// direction. The break-on-equal form avoids uint overflow at the bounds.
+		for u := start; ; {
+			uids = append(uids, u)
+			if u == stop {
+				break
+			}
+			if start <= stop {
+				u++
+			} else {
+				u--
+			}
+		}
+	}
+	return uids, nil
+}
+
+// parseUID parses a single COPYUID UID atom. UIDs are nz-number (RFC 3501), so 0
+// is rejected.
+func parseUID(s string) (uint32, error) {
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid uid %q: %w", s, err)
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("invalid uid 0")
+	}
+	return uint32(n), nil
 }
 
 func (c *Client) move(uid bool, seqset *imap.SeqSet, dest string) error {

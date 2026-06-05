@@ -788,6 +788,217 @@ func TestClient_Copy_Uid(t *testing.T) {
 	}
 }
 
+func TestClient_UidCopyWithData(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string // server response following the command tag and a space
+		wantData *CopyData
+		wantErr  bool
+	}{
+		{
+			name:     "uidplus single message",
+			response: "OK [COPYUID 1234567890 78 42] UID COPY completed\r\n",
+			wantData: &CopyData{
+				UIDValidity: 1234567890,
+				SourceUIDs:  []uint32{78},
+				DestUIDs:    []uint32{42},
+			},
+		},
+		{
+			name:     "uidplus message range expands in order",
+			response: "OK [COPYUID 1234567890 78:80 42:44] UID COPY completed\r\n",
+			wantData: &CopyData{
+				UIDValidity: 1234567890,
+				SourceUIDs:  []uint32{78, 79, 80},
+				DestUIDs:    []uint32{42, 43, 44},
+			},
+		},
+		{
+			name:     "uidplus discontiguous set preserves source-to-dest pairing",
+			response: "OK [COPYUID 1234567890 5,10:12,7 100,200:202,150] UID COPY completed\r\n",
+			wantData: &CopyData{
+				UIDValidity: 1234567890,
+				SourceUIDs:  []uint32{5, 10, 11, 12, 7},
+				DestUIDs:    []uint32{100, 200, 201, 202, 150},
+			},
+		},
+		{
+			name:     "server without uidplus",
+			response: "OK UID COPY completed\r\n",
+			wantData: nil,
+		},
+		{
+			name:     "copyuid source/dest size mismatch",
+			response: "OK [COPYUID 1234567890 78:80 42] UID COPY completed\r\n",
+			wantErr:  true,
+		},
+		{
+			name:     "server error",
+			response: "NO [TRYCREATE] mailbox does not exist\r\n",
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, s := newTestClient(t)
+			defer s.Close()
+
+			setClientState(c, imap.SelectedState, nil)
+
+			seqset, _ := imap.ParseSeqSet("78")
+
+			type result struct {
+				data *CopyData
+				err  error
+			}
+			resCh := make(chan result, 1)
+			go func() {
+				data, err := c.UidCopyWithData(seqset, "Drafts")
+				resCh <- result{data, err}
+			}()
+
+			tag, cmd := s.ScanCmd()
+			if cmd != "UID COPY 78 \"Drafts\"" {
+				t.Fatalf("client sent command %v, want %v", cmd, "UID COPY 78 \"Drafts\"")
+			}
+
+			s.WriteString(tag + " " + tt.response)
+
+			res := <-resCh
+			if tt.wantErr {
+				if res.err == nil {
+					t.Fatalf("UidCopyWithData() expected an error, got nil")
+				}
+				return
+			}
+			if res.err != nil {
+				t.Fatalf("UidCopyWithData() = %v", res.err)
+			}
+			if !reflect.DeepEqual(res.data, tt.wantData) {
+				t.Errorf("CopyData = %#v, want %#v", res.data, tt.wantData)
+			}
+		})
+	}
+}
+
+func Test_parseCopyData(t *testing.T) {
+	copyUid := func(args ...interface{}) *imap.StatusResp {
+		return &imap.StatusResp{Type: imap.StatusRespOk, Code: imap.CodeCopyUid, Arguments: args}
+	}
+
+	tests := []struct {
+		name    string
+		status  *imap.StatusResp
+		want    *CopyData
+		wantErr bool
+	}{
+		{
+			name:   "nil status",
+			status: nil,
+			want:   nil,
+		},
+		{
+			name:   "no copyuid code",
+			status: &imap.StatusResp{Type: imap.StatusRespOk},
+			want:   nil,
+		},
+		{
+			name:   "valid",
+			status: copyUid("1234567890", "78", "42"),
+			want:   &CopyData{UIDValidity: 1234567890, SourceUIDs: []uint32{78}, DestUIDs: []uint32{42}},
+		},
+		{
+			name:   "descending range expands in listed order",
+			status: copyUid("1", "80:78", "44:42"),
+			want:   &CopyData{UIDValidity: 1, SourceUIDs: []uint32{80, 79, 78}, DestUIDs: []uint32{44, 43, 42}},
+		},
+		{
+			name:    "wrong argument count",
+			status:  copyUid("1234567890", "78"),
+			wantErr: true,
+		},
+		{
+			name:    "non-string argument",
+			status:  copyUid("1234567890", 78, "42"),
+			wantErr: true,
+		},
+		{
+			name:    "non-numeric uidvalidity",
+			status:  copyUid("abc", "78", "42"),
+			wantErr: true,
+		},
+		{
+			name:    "unparseable source set",
+			status:  copyUid("1", "x", "42"),
+			wantErr: true,
+		},
+		{
+			name:    "unparseable dest set",
+			status:  copyUid("1", "78", "4:x"),
+			wantErr: true,
+		},
+		{
+			name:    "source/dest size mismatch",
+			status:  copyUid("1", "78:80", "42"),
+			wantErr: true,
+		},
+		{
+			name:    "wildcard rejected",
+			status:  copyUid("1", "78", "42:*"),
+			wantErr: true,
+		},
+		{
+			name:    "uid 0 rejected",
+			status:  copyUid("1", "0", "42"),
+			wantErr: true,
+		},
+		{
+			name:    "empty set rejected",
+			status:  copyUid("1", "", "42"),
+			wantErr: true,
+		},
+		{
+			// A malicious/buggy server must not be able to make the client
+			// allocate a multi-gigabyte slice from a tiny response.
+			name:    "oversized range rejected",
+			status:  copyUid("1", "1:4294967295", "1:4294967295"),
+			wantErr: true,
+		},
+		{
+			// The cap is enforced against the running total, so it can't be
+			// bypassed by splitting an oversized set across comma-separated
+			// ranges each individually under the limit.
+			name:    "comma-separated ranges exceed cap",
+			status:  copyUid("1", "1:600000,1:600000", "1:600000,1:600000"),
+			wantErr: true,
+		},
+		{
+			name:    "uidvalidity 0 rejected",
+			status:  copyUid("0", "78", "42"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseCopyData(tt.status)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseCopyData() expected an error, got nil (data=%#v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseCopyData() = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("parseCopyData() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClient_Unselect(t *testing.T) {
 	c, s := newTestClient(t)
 	defer s.Close()
