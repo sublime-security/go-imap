@@ -29,8 +29,9 @@ func (be *Backend) AddUser(username, password string) (*User, error) {
 	}
 
 	user := &User{
-		username: username,
-		password: password,
+		username:  username,
+		password:  password,
+		mailboxes: map[string]*Mailbox{},
 	}
 
 	be.userLock.Lock()
